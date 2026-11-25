@@ -11,7 +11,7 @@ struct GeneratorView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.tertiary)
-                Text("New password").font(.system(size: 18, weight: .semibold))
+                Text("Nieuw wachtwoord").font(.system(size: 18, weight: .semibold))
                 Spacer()
             }
             .padding(.horizontal, 18)
@@ -29,7 +29,8 @@ struct GeneratorView: View {
                     Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .medium))
                 }
                 .buttonStyle(.borderless)
-                .help("Another one (⌘G)")
+                .accessibilityLabel("Ander wachtwoord genereren")
+                .help("Ander wachtwoord (⌘G)")
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 16)
@@ -40,8 +41,8 @@ struct GeneratorView: View {
             HStack(spacing: 8) {
                 Spacer()
                 Chip(icon: "arrow.clockwise", label: "⌘G")
-                Chip(icon: "escape", label: "Back")
-                Chip(icon: "return", label: "Copy")
+                Chip(icon: "escape", label: "Terug")
+                Chip(icon: "return", label: "Kopiëren")
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 14)

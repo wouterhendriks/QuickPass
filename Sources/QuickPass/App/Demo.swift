@@ -57,10 +57,9 @@ final class DemoPasswords: PasswordsApp {
         return out
     }
 
-    override func websites(of logins: [Login], fillBlanks: Bool, stop: () -> Bool, found: (Login, String) -> Void) throws {
-        for login in logins where !stop() {
-            if let entry = entry(login) { found(login, entry.website) }
-        }
+    override func favoritePassword(for login: Login) throws -> String? {
+        guard entry(login) != nil else { throw PasswordsError.notFound }
+        return password(for: login)
     }
 
     private func password(for login: Login) -> String {
@@ -79,8 +78,7 @@ final class DemoPasswords: PasswordsApp {
     }
 
     override func reveal(_ login: Login) throws {}
-    override func quitIfIdle(onlyIfLocked: Bool) {}
-    override var isLocked: Bool { false }
+    override func quitIfIdle() {}
     override func unlock() -> Bool { true }
 
     /// A code that changes every 30 seconds, like a real one.

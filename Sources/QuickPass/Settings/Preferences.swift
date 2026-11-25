@@ -1,17 +1,6 @@
 import Foundation
 import ServiceManagement
 
-/// When QuickPass quits the Passwords app after using it, which takes it out of the Dock.
-enum QuitPasswords: Int {
-    case rightAway, onceLocked, never
-}
-
-extension QuitPasswords {
-    /// Waiting for Passwords to lock costs no extra Touch ID, and it still leaves the Dock a
-    /// minute or two later.
-    static let standard = QuitPasswords.onceLocked
-}
-
 /// User settings, saved in UserDefaults.
 final class Preferences: ObservableObject {
     static let shared = Preferences()
@@ -21,12 +10,6 @@ final class Preferences: ObservableObject {
     @Published var copyPasswordShortcut: Shortcut { didSet { save(copyPasswordShortcut, as: Key.copyPassword) } }
     @Published var copyCodeShortcut: Shortcut { didSet { save(copyCodeShortcut, as: Key.copyCode) } }
     @Published var showMenuBarIcon: Bool { didSet { defaults.set(showMenuBarIcon, forKey: Key.showMenuBarIcon) } }
-    @Published var suggestFromBrowser: Bool { didSet { defaults.set(suggestFromBrowser, forKey: Key.suggestFromBrowser) } }
-    /// Ask for Touch ID as the panel opens when Passwords is locked, instead of mid-copy.
-    @Published var unlockOnOpen: Bool { didSet { defaults.set(unlockOnOpen, forKey: Key.unlockOnOpen) } }
-    /// Show each site's own icon in place of the letter, fetched from the site.
-    @Published var showSiteIcons: Bool { didSet { defaults.set(showSiteIcons, forKey: Key.showSiteIcons) } }
-    @Published var quitPasswords: QuitPasswords { didSet { defaults.set(quitPasswords.rawValue, forKey: Key.quitPasswords) } }
     @Published var passwordRecipe: PasswordRecipe { didSet { saveRecipe() } }
     /// Seconds before a copied password or code is cleared from the clipboard. 0 means never.
     @Published var clearClipboardAfter: Int { didSet { defaults.set(clearClipboardAfter, forKey: Key.clearClipboardAfter) } }
@@ -44,14 +27,6 @@ final class Preferences: ObservableObject {
             try? newValue ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
             objectWillChange.send()
         }
-    }
-
-    /// Turns on launch at login the first time QuickPass runs, and never again after that,
-    /// so turning it off in Settings sticks.
-    func enableLaunchAtLoginOnFirstRun() {
-        guard !defaults.bool(forKey: Key.didFirstRun) else { return }
-        defaults.set(true, forKey: Key.didFirstRun)
-        launchAtLogin = true
     }
 
     /// Whether the welcome window has been finished once.
@@ -85,14 +60,9 @@ final class Preferences: ObservableObject {
         static let copyPassword = "copyPasswordShortcut"
         static let copyCode = "copyCodeShortcut"
         static let showMenuBarIcon = "showMenuBarIcon"
-        static let suggestFromBrowser = "suggestFromBrowser"
-        static let unlockOnOpen = "unlockOnOpen"
-        static let showSiteIcons = "showSiteIcons"
-        static let quitPasswords = "quitPasswords"
         static let passwordRecipe = "passwordRecipe"
         static let clearClipboardAfter = "clearClipboardAfter"
         static let rememberSearchFor = "rememberSearchFor"
-        static let didFirstRun = "didFirstRun"
         static let didOnboard = "didOnboard"
     }
 
@@ -106,10 +76,6 @@ final class Preferences: ObservableObject {
         copyPasswordShortcut = shortcut(Key.copyPassword) ?? .copyPassword
         copyCodeShortcut = shortcut(Key.copyCode) ?? .copyCode
         showMenuBarIcon = defaults.object(forKey: Key.showMenuBarIcon) as? Bool ?? true
-        suggestFromBrowser = defaults.object(forKey: Key.suggestFromBrowser) as? Bool ?? true
-        unlockOnOpen = defaults.object(forKey: Key.unlockOnOpen) as? Bool ?? true
-        showSiteIcons = defaults.object(forKey: Key.showSiteIcons) as? Bool ?? true
-        quitPasswords = (defaults.object(forKey: Key.quitPasswords) as? Int).flatMap(QuitPasswords.init) ?? .standard
         passwordRecipe = defaults.data(forKey: Key.passwordRecipe)
             .flatMap { try? JSONDecoder().decode(PasswordRecipe.self, from: $0) } ?? PasswordRecipe()
         clearClipboardAfter = defaults.object(forKey: Key.clearClipboardAfter) as? Int ?? 60

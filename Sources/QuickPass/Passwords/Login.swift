@@ -21,6 +21,14 @@ struct Login: Codable, Hashable {
 
     func sameName(as other: Login) -> Bool { title == other.title && username == other.username }
 
+    static func favorites(in logins: [Login], pinned: Set<Login>) -> [Login] {
+        // Passwords has no stable ID for rows with identical titles and usernames.
+        logins.filter { login in
+            pinned.contains(login) && login.copy == 0
+                && !logins.contains { $0.copy != login.copy && $0.sameName(as: login) }
+        }
+    }
+
     /// Stable key for storing per-login data such as usage counts.
     var key: String { copy == 0 ? "\(title)\n\(username)" : "\(title)\n\(username)\n\(copy)" }
 }

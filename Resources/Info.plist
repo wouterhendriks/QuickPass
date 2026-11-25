@@ -3,17 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<string>nl</string>
 	<key>CFBundleDisplayName</key>
-	<string>QuickPass</string>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>nl</string>
+	</array>
 	<key>CFBundleName</key>
-	<string>QuickPass</string>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -26,15 +30,7 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>QuickPass reads the address of your browser's current tab to suggest the matching login.</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 JK Creative Studios LLC. Licensed under GPLv3.</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/jessekhach/QuickPass/main/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>qHpg4tUVtaunvRYN8A6ShQpiOIG2YDaPzVRvfUIxjig=</string>
+	<string>© 2026 JK Creative Studios LLC. Uitgebracht onder GPLv3.</string>
 </dict>
 </plist>

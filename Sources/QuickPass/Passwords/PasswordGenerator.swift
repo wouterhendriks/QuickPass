@@ -4,7 +4,7 @@ import Foundation
 enum PasswordStyle: Int, Codable {
     /// Random characters at a chosen length.
     case random = 1
-    /// Everyday words joined by a separator, like "Cherub-motivate-zoom7-abacus".
+    /// Everyday Dutch words joined by the selected separator.
     case memorable = 2
     /// Digits only.
     case pin = 3
@@ -41,7 +41,16 @@ enum PasswordGenerator {
             return String(characters.shuffled(using: &random))
 
         case .memorable:
-            var words = (0..<max(recipe.wordCount, 1)).map { _ in dictionary.randomElement(using: &random) ?? "word" }
+            guard !dictionary.isEmpty else {
+                // Missing bundle data must not turn password generation into a predictable phrase.
+                var fallback = recipe
+                fallback.style = .random
+                fallback.length = max(recipe.length, 32)
+                return make(fallback)
+            }
+            var words = (0..<max(recipe.wordCount, 1)).map { _ in
+                dictionary[Int.random(in: dictionary.indices, using: &random)]
+            }
             if recipe.capitalize { words = words.map { $0.prefix(1).uppercased() + $0.dropFirst() } }
             if recipe.addNumber {
                 let index = Int.random(in: words.indices, using: &random)
@@ -60,14 +69,15 @@ enum PasswordGenerator {
     /// Symbols nearly every site accepts. Leaves out quotes, backslash and spaces, which some reject.
     private static let symbolSet = "!@#$%^&*-_=+?"
 
-    /// EFF's Large Wordlist: 7,776 everyday words chosen for passphrases, about 12.9 bits of
-    /// randomness each. Lines read "11111<tab>abacus". The few with a hyphen are left out so they
-    /// can't be confused with the separator.
+    /// Require the full set of unique entries so each draw provides the intended entropy.
     private static let dictionary: [String] = {
-        guard let url = Bundle.main.url(forResource: "eff_large_wordlist", withExtension: "txt"),
+        guard let url = Bundle.main.url(forResource: "dutch_diceware", withExtension: "txt"),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").compactMap { line in
-            line.split(separator: "\t").last.map(String.init)
-        }.filter { !$0.contains("-") }
+        let words = text.split(whereSeparator: \.isNewline)
+            .filter { !$0.hasPrefix("#") }
+            .map(String.init)
+        guard words.count == 7_776, Set(words).count == words.count,
+              words.allSatisfy({ $0.utf8.allSatisfy { (97...122).contains($0) } }) else { return [] }
+        return words
     }()
 }

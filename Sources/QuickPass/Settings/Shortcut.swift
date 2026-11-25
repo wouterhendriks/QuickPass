@@ -40,7 +40,7 @@ struct Shortcut: Codable, Equatable {
         if modifiers.contains(.option) { symbols += "⌥" }
         if modifiers.contains(.shift) { symbols += "⇧" }
         if modifiers.contains(.command) { symbols += "⌘" }
-        return symbols + key
+        return symbols + (Int(keyCode) == kVK_Space ? "Spatie" : key)
     }
 
     /// The key as a menu item key equivalent. nil for keys a menu can't show, like Space or arrows.

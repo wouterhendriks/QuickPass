@@ -12,33 +12,33 @@ struct PasswordOptionsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Picker("Type", selection: recipe.style) {
-                    Text("Random").tag(PasswordStyle.random)
-                    Text("Memorable").tag(PasswordStyle.memorable)
-                    Text("PIN").tag(PasswordStyle.pin)
+                    Text("Willekeurig").tag(PasswordStyle.random)
+                    Text("Wachtwoordzin").tag(PasswordStyle.memorable)
+                    Text("Pincode").tag(PasswordStyle.pin)
                 }
                 .fixedSize()
                 switch preferences.passwordRecipe.style {
-                case .random: slider("Characters", value: recipe.length, in: 8...64)
-                case .memorable: slider("Words", value: recipe.wordCount, in: 3...10)
-                case .pin: slider("Digits", value: recipe.pinLength, in: 4...12)
+                case .random: slider("Tekens", value: recipe.length, in: 8...64)
+                case .memorable: slider("Woorden", value: recipe.wordCount, in: 3...10)
+                case .pin: slider("Cijfers", value: recipe.pinLength, in: 4...12)
                 }
             }
             switch preferences.passwordRecipe.style {
             case .random:
                 HStack(spacing: 16) {
-                    Toggle("Uppercase", isOn: recipe.uppercase)
-                    Toggle("Numbers", isOn: recipe.numbers)
-                    Toggle("Symbols", isOn: recipe.symbols)
+                    Toggle("Hoofdletters", isOn: recipe.uppercase)
+                    Toggle("Cijfers", isOn: recipe.numbers)
+                    Toggle("Symbolen", isOn: recipe.symbols)
                 }
             case .memorable:
                 HStack(spacing: 16) {
-                    Toggle("Capitalize", isOn: recipe.capitalize)
-                    Toggle("Number", isOn: recipe.addNumber)
-                    Picker("Separator", selection: recipe.separator) {
-                        Text("Hyphen").tag("-")
-                        Text("Period").tag(".")
-                        Text("Underscore").tag("_")
-                        Text("Space").tag(" ")
+                    Toggle("Hoofdletters", isOn: recipe.capitalize)
+                    Toggle("Cijfer toevoegen", isOn: recipe.addNumber)
+                    Picker("Scheidingsteken", selection: recipe.separator) {
+                        Text("Koppelteken").tag("-")
+                        Text("Punt").tag(".")
+                        Text("Onderstrepingsteken").tag("_")
+                        Text("Spatie").tag(" ")
                     }
                     .fixedSize()
                 }
@@ -57,6 +57,7 @@ struct PasswordOptionsView: View {
             Text(label).foregroundStyle(.secondary)
             Slider(value: Binding(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Int($0) }),
                    in: Double(range.lowerBound)...Double(range.upperBound), step: 1)
+                .accessibilityLabel(label)
             Text("\(value.wrappedValue)").monospacedDigit().frame(width: 22, alignment: .trailing)
         }
     }

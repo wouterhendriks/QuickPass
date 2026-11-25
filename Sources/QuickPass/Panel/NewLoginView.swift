@@ -14,7 +14,7 @@ struct NewLoginView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.tertiary)
-                Text("New login").font(.system(size: 18, weight: .semibold))
+                Text("Nieuwe inloggegevens").font(.system(size: 18, weight: .semibold))
                 Spacer()
             }
             .padding(.horizontal, 18)
@@ -23,25 +23,27 @@ struct NewLoginView: View {
             Divider().padding(.horizontal, 12)
 
             VStack(spacing: 10) {
-                row("Title", icon: "textformat") {
-                    TextField("Name in Passwords", text: binding(\.title)).focused($focus, equals: .title)
+                row("Titel", icon: "textformat") {
+                    TextField("Naam in Wachtwoorden", text: binding(\.title)).focused($focus, equals: .title)
                 }
                 row("Website", icon: "globe") {
-                    TextField("example.com", text: binding(\.website)).focused($focus, equals: .website)
+                    TextField("voorbeeld.example", text: binding(\.website)).focused($focus, equals: .website)
                 }
-                row("Username or email", icon: "person.fill") {
-                    TextField("you@example.com", text: binding(\.username)).focused($focus, equals: .username)
+                row("Gebruikersnaam of e-mailadres", icon: "person.fill") {
+                    TextField("naam@voorbeeld.example", text: binding(\.username)).focused($focus, equals: .username)
                 }
-                row("Password", icon: "key.fill") {
+                row("Wachtwoord", icon: "key.fill") {
                     HStack {
                         TextField("", text: binding(\.password))
                             .font(.system(size: 15, design: .monospaced))
+                            .accessibilityLabel("Wachtwoord")
                             .focused($focus, equals: .password)
                         Button(action: model.regenerate) {
                             Image(systemName: "arrow.clockwise")
                         }
                         .buttonStyle(.borderless)
-                        .help("New password (⌘G)")
+                        .accessibilityLabel("Ander wachtwoord genereren")
+                        .help("Nieuw wachtwoord (⌘G)")
                     }
                 }
             }
@@ -58,8 +60,8 @@ struct NewLoginView: View {
             HStack(spacing: 8) {
                 Spacer()
                 Chip(icon: "arrow.clockwise", label: "⌘G")
-                Chip(icon: "escape", label: "Cancel")
-                Chip(icon: "return", label: "Save")
+                Chip(icon: "escape", label: "Annuleren")
+                Chip(icon: "return", label: "Bewaren")
             }
             .padding(.horizontal, 18)
             .padding(.bottom, 14)

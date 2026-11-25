@@ -14,7 +14,7 @@ struct DetailView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.tertiary)
-                LoginIcon(login: login, host: model.iconHost(for: login), size: 34, icons: model.icons, preferences: preferences)
+                Monogram(title: login.title, size: 34)
                 Text(login.title).font(.system(size: 18, weight: .semibold)).lineLimit(1)
                 Spacer()
             }
@@ -40,19 +40,19 @@ private extension DetailView {
             FieldRow(model: model, preferences: preferences, login: login, field: field, selected: selected)
                 .frame(height: 54)
         case .fill:
-            ActionRow(icon: "keyboard", title: "Fill in username and password", shortcut: "⌘↩", selected: selected)
+            ActionRow(icon: "keyboard", title: "Gebruikersnaam en wachtwoord invullen", shortcut: "⌘↩", selected: selected)
                 .frame(height: 42)
         case .fillCode:
-            ActionRow(icon: "number", title: "Fill in verification code", shortcut: "⌥⌘↩", selected: selected)
+            ActionRow(icon: "number", title: "Verificatiecode invullen", shortcut: "⌥⌘↩", selected: selected)
                 .frame(height: 42)
         case .openInPasswords:
-            ActionRow(icon: "key.viewfinder", title: "Open in Passwords", shortcut: "⇧⌘O", selected: selected)
+            ActionRow(icon: "key.viewfinder", title: "Open in Wachtwoorden", shortcut: "⇧⌘O", selected: selected)
                 .frame(height: 42)
         case .delete:
             if model.confirmingDelete {
                 ConfirmDeleteRow(login: login).frame(height: 42)
             } else {
-                ActionRow(icon: "trash", title: "Delete…", shortcut: "⌘⌫", selected: selected, destructive: true)
+                ActionRow(icon: "trash", title: "Verwijderen…", shortcut: "⌘⌫", selected: selected, destructive: true)
                     .frame(height: 42)
             }
         }
@@ -93,12 +93,12 @@ private struct ConfirmDeleteRow: View {
                 .font(.system(size: 14))
                 .foregroundStyle(.white)
                 .frame(width: 30)
-            Text(login.username.isEmpty ? "Delete \(login.title)?" : "Delete \(login.title) (\(login.username))?")
+            Text(login.username.isEmpty ? "“\(login.title)” verwijderen?" : "“\(login.title)” (\(login.username)) verwijderen?")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            Text("↩ Delete   ⎋ Cancel")
+            Text("↩ Verwijderen   ⎋ Annuleren")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.85))
         }

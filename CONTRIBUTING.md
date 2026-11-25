@@ -5,20 +5,20 @@ Bug reports and pull requests are welcome.
 ## Building
 
 1. Install Xcode 26 or later and XcodeGen: `brew install xcodegen`
-2. Set `DEVELOPMENT_TEAM` in `project.yml` to your own team ID. A real signing certificate is required because macOS ties the Accessibility permission to the app's signature. With ad hoc signing the permission has to be granted again after every build.
-3. Run `./build.sh` to build, install to `~/Applications` and launch.
+2. Run `./build.sh` to build the ad hoc signed app. macOS may ask you to grant Accessibility access again after rebuilding.
 
-The Xcode project is generated from `project.yml`. Make project changes there rather than in `QuickPass.xcodeproj`.
+The Xcode project is generated from `project.yml`. Make project changes there rather than in `SnelWachtwoord.xcodeproj`.
 
 ## Demo mode
 
-Debug builds launched with `-demo` show made-up logins and never touch the Passwords app or QuickPass's saved files. The README screenshots and demo video come from it:
+Debug builds launched with `-demo` show made-up logins and never touch the Passwords app or SnelWachtwoord's saved files.
 
 ```bash
-open -n build/DerivedDataDebug/Build/Products/Debug/QuickPass.app --args -demo
+xcodebuild -project SnelWachtwoord.xcodeproj -scheme SnelWachtwoord -configuration Debug -derivedDataPath build/DerivedDataDebug build
+open -n build/DerivedDataDebug/Build/Products/Debug/SnelWachtwoord.app --args -demo
 ```
 
-Quit any other copy of QuickPass first, since both register the same shortcut.
+Quit any other copy of SnelWachtwoord first, since both register the same shortcut.
 
 ## Project structure
 
@@ -28,12 +28,12 @@ Sources/QuickPass
 ├── Panel      search bar, login details, new-login form, password generator
 ├── Passwords  Passwords app integration, login model, password generator
 ├── Settings   preferences, shortcuts, Settings window
-└── System     global shortcut, browser tab lookup, typing, menu bar icon, updates, website icons
+└── System     global shortcut, typing, menu bar icon
 ```
 
 ## After a macOS update
 
-Most breakage will be in `Passwords/PasswordsApp.swift`, which drives the Passwords app through Accessibility. QuickPass finds elements by their accessibility identifiers and menu shortcuts rather than by visible text, so it works in any language. Accessibility Inspector (Xcode › Open Developer Tool) shows the identifiers it relies on:
+Most breakage will be in `Passwords/PasswordsApp.swift`, which drives the Passwords app through Accessibility. SnelWachtwoord finds elements by their accessibility identifiers and menu shortcuts rather than by visible text, so it works in any language. Accessibility Inspector (Xcode › Open Developer Tool) shows the identifiers it relies on:
 
 | Area | Identifiers |
 | --- | --- |

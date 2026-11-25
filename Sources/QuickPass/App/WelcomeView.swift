@@ -3,7 +3,6 @@ import Combine
 import SwiftUI
 
 /// First-run setup: Accessibility access, loading the login list, and the shortcut.
-/// Shown again at launch whenever Accessibility access is missing.
 struct WelcomeView: View {
     @ObservedObject var model: SearchModel
     @ObservedObject var preferences: Preferences
@@ -20,48 +19,37 @@ struct WelcomeView: View {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
                     .frame(width: 88, height: 88)
-                Text("Welcome to QuickPass")
+                Text("Welkom bij SnelWachtwoord")
                     .font(.system(size: 24, weight: .semibold))
-                Text("Search Apple Passwords from anywhere with a shortcut.")
+                Text("Kopieer je favoriete inloggegevens vanuit de menubalk.")
                     .foregroundStyle(.secondary)
             }
 
             VStack(spacing: 0) {
-                Step(number: 1, title: "Allow Accessibility",
-                     detail: "QuickPass reads the Passwords app the way a screen reader does.",
+                Step(number: 1, title: "Geef toegang via Toegankelijkheid",
+                     detail: "SnelWachtwoord leest de app Wachtwoorden op dezelfde manier als een schermlezer.",
                      done: trusted) {
-                    Button("Open System Settings", action: requestAccess)
+                    Button("Open Systeeminstellingen", action: requestAccess)
                 }
                 Divider().padding(.leading, 52)
-                Step(number: 2, title: "Load your logins",
+                Step(number: 2, title: "Lees je inloggegevens in",
                      detail: model.logins.isEmpty
-                        ? "Unlock Passwords with Touch ID. QuickPass keeps site names and usernames, never passwords."
-                        : "\(model.logins.count.formatted()) logins ready to search.",
+                        ? "Ontgrendel Wachtwoorden met Touch ID. SnelWachtwoord bewaart titels en gebruikersnamen lokaal."
+                        : "Je kunt nu \(model.logins.count.formatted()) inloggegevens doorzoeken.",
                      done: !model.logins.isEmpty) {
-                    Button("Unlock Passwords") { model.refresh(unlock: true, done: refocus) }
+                    Button("Laad inloggegevens") { model.synchronizeFavorites(done: refocus) }
                         .disabled(!trusted || model.busy)
                 }
                 Divider().padding(.leading, 52)
-                Step(number: 3, title: "Show website icons",
-                     detail: model.backfillRunning
-                        ? "\(model.websitesKnown.formatted()) of \(model.logins.count.formatted()) logins checked. Keeping Passwords open speeds this up, and it may ask for Touch ID again."
-                        : model.websitesKnown > 0
-                        ? "\(model.websitesKnown.formatted()) of \(model.logins.count.formatted()) logins checked. Optional, and you can stop any time."
-                        : "QuickPass reads each login's website from Passwords and gets the icon from that site. Optional.",
-                     done: !model.logins.isEmpty && model.websitesKnown == model.logins.count) {
-                    BackfillButton(model: model)
-                        .disabled(!trusted || model.logins.isEmpty)
-                }
-                Divider().padding(.leading, 52)
-                Step(number: 4, title: "Press \(preferences.openShortcut.display) anywhere",
-                     detail: "The search bar opens over whatever you're doing. You can change the shortcut in Settings.",
+                Step(number: 3, title: "Druk in elke app op \(preferences.openShortcut.display)",
+                     detail: "Kies favorieten met de ster. Synchroniseer ze daarna vanuit het menubalkmenu.",
                      done: false) {
                     EmptyView()
                 }
             }
             .background(RoundedRectangle(cornerRadius: 12).fill(.quaternary.opacity(0.4)))
 
-            Button("Get Started", action: finish)
+            Button("Aan de slag", action: finish)
                 .keyboardShortcut(.defaultAction)
                 .controlSize(.large)
                 .disabled(!trusted || model.logins.isEmpty)

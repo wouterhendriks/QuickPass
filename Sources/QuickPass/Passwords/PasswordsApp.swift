@@ -3,21 +3,22 @@ import ApplicationServices
 import os
 
 /// Why a step in Passwords failed. Never logs passwords or login details.
-/// Watch with: log stream --predicate 'subsystem == "com.jkcreativestudios.quickpass"'
-private let log = Logger(subsystem: "com.jkcreativestudios.quickpass", category: "Passwords")
+/// Watch with: log stream --predicate 'subsystem == "nl.webwerf.snelwachtwoord"'
+private let log = Logger(subsystem: "nl.webwerf.snelwachtwoord", category: "Passwords")
 
 enum PasswordsError: LocalizedError {
-    case locked, unlockFailed, notFound, copyFailed, saveFailed, deleteFailed, notSureWhichLogin
+    case locked, unlockFailed, notFound, copyFailed, saveFailed, deleteFailed, notSureWhichLogin, ambiguousFavorite
 
     var errorDescription: String? {
         switch self {
-        case .locked: "Passwords is locked."
-        case .unlockFailed: "Passwords didn't unlock."
-        case .notFound: "Couldn't find that login in Passwords. Try again in a moment."
-        case .copyFailed: "Passwords didn't copy. Try again."
-        case .saveFailed: "Passwords didn't save the login. Try again."
-        case .deleteFailed: "Passwords didn't delete the login. Try again."
-        case .notSureWhichLogin: "Couldn't confirm which login is selected, so nothing was deleted. Use Open in Passwords instead."
+        case .locked: "Wachtwoorden is vergrendeld."
+        case .unlockFailed: "Wachtwoorden is niet ontgrendeld."
+        case .notFound: "Deze inloggegevens zijn niet gevonden in Wachtwoorden. Probeer het zo opnieuw."
+        case .copyFailed: "Kopiëren uit Wachtwoorden is mislukt. Probeer het opnieuw."
+        case .saveFailed: "Wachtwoorden heeft de inloggegevens niet opgeslagen. Probeer het opnieuw."
+        case .deleteFailed: "Wachtwoorden heeft de inloggegevens niet verwijderd. Probeer het opnieuw."
+        case .notSureWhichLogin: "De selectie kon niet worden bevestigd. Kies ‘Open in Wachtwoorden’ om de juiste inloggegevens te verwijderen."
+        case .ambiguousFavorite: "Meerdere inloggegevens hebben dezelfde titel en gebruikersnaam. Geef ze verschillende titels in Wachtwoorden."
         }
     }
 }
@@ -139,46 +140,10 @@ class PasswordsApp {
         return out
     }
 
-    /// Reads the website of each of `logins`, for the website icons backfill, passing each to
-    /// `found` as it's read. Goes to each login's row by its saved position, so logins already
-    /// done cost nothing. Checks `stop` before every login.
-    func websites(of logins: [Login], fillBlanks: Bool, stop: () -> Bool, found: (Login, String) -> Void) throws {
-        prepare()
-        guard list() != nil else { throw PasswordsError.locked }
-        clearSearch()
-        show("AllTile")
-        // Rows that loaded while Passwords was hidden can be blank. Filling them brings Passwords
-        // forward for a moment, so the caller asks for it once per scan.
-        if fillBlanks { fillBlankRows() }
-        // A login usually sits at its saved row. When rows have moved, read the whole list once
-        // for the batch instead of once per login.
-        var rowsByLogin: [Login: AXUIElement]?
-        func row(for login: Login) -> AXUIElement? {
-            let rows = rows()
-            if rows.indices.contains(login.index), isRow(login.index, of: rows, login) {
-                return rows[login.index]
-            }
-            if rowsByLogin == nil {
-                var all = rows.enumerated().map { self.login(of: $1, at: $0) }
-                numberCopies(&all, in: rows)
-                rowsByLogin = Dictionary(zip(all, rows), uniquingKeysWith: { first, _ in first })
-            }
-            return rowsByLogin?[login]
-        }
-        for login in logins where !stop() {
-            guard let list = list() else { throw PasswordsError.locked }
-            guard let row = row(for: login) else { continue }
-            AXUIElementSetAttributeValue(list, kAXSelectedRowsAttribute as CFString, [row] as CFArray)
-            // Same short wait as select(), so the previous login's pane isn't read for this one.
-            usleep(80_000)
-            for _ in 0..<30 {
-                if let window = windows().first(where: { field("TitleField", in: $0) == login.title }) {
-                    found(login, field("WebsiteField", in: window) ?? "")
-                    break
-                }
-                usleep(20_000)
-            }
-        }
+    func favoritePassword(for login: Login) throws -> String? {
+        let window = try select(login, requireUnique: true)
+        // Sync never falls back to copying secrets through the user's clipboard.
+        return revealPassword(in: window)
     }
 
     /// Read with Passwords' own Reveal Password, which works while Passwords stays hidden and keeps
@@ -405,16 +370,10 @@ class PasswordsApp {
 
     /// Quits Passwords if QuickPass left it running in the background: not in front, and hidden or
     /// without a window. Leaves it alone while the user has it open.
-    func quitIfIdle(onlyIfLocked: Bool) {
+    func quitIfIdle() {
         guard let app, !app.isActive, app.isHidden || windows().isEmpty else { return }
-        if onlyIfLocked, list() != nil { return }
         DispatchQueue.main.sync { _ = app.terminate() }
         shownTile = nil
-    }
-
-    var isLocked: Bool {
-        prepare()
-        return list() == nil
     }
 
     var isRunning: Bool { app != nil }
@@ -580,7 +539,7 @@ class PasswordsApp {
     // MARK: - Finding a login
 
     /// Selects the login in the All list and waits until the detail pane shows it.
-    private func select(_ login: Login) throws -> AXUIElement {
+    private func select(_ login: Login, requireUnique: Bool = false) throws -> AXUIElement {
         prepare()
         guard list() != nil else { throw PasswordsError.locked }
         clearSearch()
@@ -593,7 +552,11 @@ class PasswordsApp {
             found = find(login)
         }
         guard let found, let list = list() else { throw PasswordsError.notFound }
-        let others = sameTitleUsernames(as: login, around: found.index)
+        var others = sameTitleUsernames(as: login, around: found.index)
+        if requireUnique, others.contains(login.username) {
+            throw PasswordsError.ambiguousFavorite
+        }
+        others.remove(login.username)
         AXUIElementSetAttributeValue(list, kAXSelectedRowsAttribute as CFString, [found.row] as CFArray)
         // The list can show an account's display name where the detail pane shows the username,
         // so the username can't be required to match. A pane still showing another login with the
@@ -622,7 +585,6 @@ class PasswordsApp {
                 i += step
             }
         }
-        names.remove(login.username)
         return names
     }
 
@@ -778,8 +740,10 @@ class PasswordsApp {
     }
 
     private func restorePasteboard(_ items: [NSPasteboardItem]) {
-        NSPasteboard.general.clearContents()
-        if !items.isEmpty { NSPasteboard.general.writeObjects(items) }
+        let pasteboard = NSPasteboard.general
+        // Restoring a local-only item must not make it available to Universal Clipboard.
+        _ = pasteboard.prepareForNewContents(with: .currentHostOnly)
+        if !items.isEmpty { pasteboard.writeObjects(items) }
     }
 
     // MARK: - Menu commands

@@ -7,15 +7,14 @@ import SwiftUI
 /// panel's keyboard: navigation, copying, opening websites and filling in logins.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private let preferences = Preferences.shared
-    private let updater = Updater()
     private lazy var model: SearchModel = {
         #if DEBUG
         if Demo.isOn { return SearchModel(preferences: preferences, passwords: DemoPasswords(), persists: false) }
         #endif
         return SearchModel(preferences: preferences)
     }()
-    private lazy var settings = SettingsWindow(preferences: preferences, model: model, updater: updater)
-    private lazy var welcome: AppWindow = AppWindow(title: "Welcome to QuickPass") { [unowned self] in
+    private lazy var settings = SettingsWindow(preferences: preferences, model: model)
+    private lazy var welcome: AppWindow = AppWindow(title: "Welkom bij SnelWachtwoord") { [unowned self] in
         WelcomeView(model: model, preferences: preferences,
                     refocus: { [unowned self] in welcome.show() },
                     finish: { [unowned self] in
@@ -26,24 +25,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var panel: SearchPanel!
     private var hotKey: HotKey?
     private var statusItem: NSStatusItem!
+    private let statusMenu = NSMenu()
     /// The app that was in front when the panel opened. Focus goes back to it afterwards.
     private var previousApp: NSRunningApplication?
     private var subscriptions: Set<AnyCancellable> = []
-    private var quitTimer: Timer?
     /// Until this moment, losing focus means macOS is late handing it back after Passwords hid,
     /// not that the user clicked away.
     private var reclaimFocusUntil = Date.distantPast
     /// The last click in another app, which always means the user is moving on.
     private var lastClickAway = Date.distantPast
-    /// The browser tab's host when the panel opened, for suggestions and new logins.
-    private var browserHost: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = SearchPanel(rootView: SearchView(model: model, preferences: preferences,
                                                  activate: { [unowned self] item in activate(item) },
-                                                 unlock: { [unowned self] in unlock() }))
+                                                 synchronize: { [unowned self] in synchronizeFromPanel() },
+                                                 copyFavorite: { [unowned self] field, login in copy(field, favorite: login) }))
         panel.delegate = self
-        model.onUnlock = { [weak self] in self?.hidePanelOncePasswordsInFront() }
+        model.onUnlock = { [weak self] in
+            guard let self, panel.isVisible else { return }
+            hidePanelOncePasswordsInFront()
+        }
         model.passwordsHidingSpot = { [weak self] in self?.searchCardFrame() }
         NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
@@ -61,34 +62,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         setUpStatusItem()
         observePreferences()
-        preferences.enableLaunchAtLoginOnFirstRun()
-        if !preferences.didOnboard || !AXIsProcessTrusted() {
+        #if DEBUG
+        if Demo.isOn {
+            model.synchronizeFavorites { [weak self] in self?.open(showFavorites: true) }
+            return
+        }
+        #endif
+        if !preferences.didOnboard {
             welcome.show()
-        } else {
-            model.refresh(unlock: false) { [weak self] in
-                self?.quitPasswordsIfDone()
-                #if DEBUG
-                if Demo.isOn { self?.model.startBackfill() } // so every demo login has its icon
-                #endif
-            }
         }
-        quitTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self, preferences.quitPasswords == .onceLocked, !panel.isVisible else { return }
-            model.quitPasswordsIfIdle(onlyIfLocked: true)
-        }
-        // Lets macOS fold this wake-up into others it's already doing, which saves battery.
-        quitTimer?.tolerance = 10
-    }
-
-    /// With the default setting, Passwords leaves the Dock as soon as QuickPass is done with it.
-    private func quitPasswordsIfDone() {
-        guard preferences.quitPasswords == .rightAway, !panel.isVisible else { return }
-        model.quitPasswordsIfIdle(onlyIfLocked: false)
     }
 
     /// Opening QuickPass again while it runs shows Settings. With the menu bar icon hidden,
     /// that's the way in.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        #if DEBUG
+        if Demo.isOn { open(showFavorites: true); return false }
+        #endif
         showSettings()
         return false
     }
@@ -106,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// The new front app isn't always reported yet when focus starts to move, so check a beat later.
     private func closeUnlessPasswordsTookFocus() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [self] in
-            guard panel.isVisible, !panel.isKeyWindow, !model.usingPasswords,
+            guard panel.isVisible, !panel.isKeyWindow, !model.usingPasswords, !model.authenticatingFavorite,
                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier != PasswordsApp.bundleID else { return }
             if Date() < reclaimFocusUntil, !clickedAway(since: Date().addingTimeInterval(-1)) { show() } else { close(restoringFocus: false) }
         }
@@ -145,16 +135,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = MenuBarIcon.image
-        let menu = NSMenu()
-        menu.addItem(withTitle: "Open QuickPass", action: #selector(openFromMenu), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Lock Now", action: #selector(lockNow), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Reload Logins", action: #selector(reloadLogins), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
-        menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit QuickPass", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        statusItem.menu = menu
+        guard let button = statusItem.button else { return }
+        button.image = MenuBarIcon.image
+        button.toolTip = "Favorieten in SnelWachtwoord"
+        button.target = self
+        button.action = #selector(statusItemClicked(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        statusMenu.addItem(withTitle: "Zoeken in Wachtwoorden", action: #selector(openFromMenu), keyEquivalent: "").target = self
+        statusMenu.addItem(withTitle: "Nu vergrendelen", action: #selector(lockNow), keyEquivalent: "").target = self
+        statusMenu.addItem(withTitle: "Synchroniseer favorieten", action: #selector(synchronizeFromMenu), keyEquivalent: "").target = self
+        statusMenu.addItem(withTitle: "Instellingen…", action: #selector(showSettings), keyEquivalent: ",").target = self
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "SnelWachtwoord stoppen", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    }
+
+    @objc private func statusItemClicked(_ button: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            statusMenu.popUp(positioning: nil, at: .zero, in: button)
+        } else if panel.isVisible, model.openedFromMenuBar {
+            close(restoringFocus: true)
+        } else {
+            open(showFavorites: true)
+        }
     }
 
     /// A menu bar app shows no menus, but AppKit still matches ⌘ shortcuts against the main menu
@@ -162,14 +164,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// the copy shortcuts and the standard editing keys an enabled home.
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
-        appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        appMenu.addItem(withTitle: "Instellingen…", action: #selector(showSettings), keyEquivalent: ",").target = self
+        appMenu.addItem(withTitle: "Venster sluiten", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
-        let editMenu = NSMenu(title: "Edit")
+        let editMenu = NSMenu(title: "Bewerken")
         let copyCommands: [(String, Field, Selector)] = [
-            ("Copy Username", .username, #selector(copyUsername)),
-            ("Copy Password", .password, #selector(copyPassword)),
-            ("Copy Verification Code", .code, #selector(copyCode)),
+            ("Gebruikersnaam kopiëren", .username, #selector(copyUsername)),
+            ("Wachtwoord kopiëren", .password, #selector(copyPassword)),
+            ("Verificatiecode kopiëren", .code, #selector(copyCode)),
         ]
         for (title, field, action) in copyCommands {
             guard let shortcut = preferences.shortcut(for: field), let key = shortcut.menuKey else { continue }
@@ -177,12 +179,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             item.keyEquivalentModifierMask = shortcut.modifiers
             item.target = self
         }
-        editMenu.addItem(withTitle: "Generate Password", action: #selector(generatePassword), keyEquivalent: "g").target = self
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(withTitle: "Wachtwoord genereren", action: #selector(generatePassword), keyEquivalent: "g").target = self
+        editMenu.addItem(withTitle: "Maak ongedaan", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Herhaal", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(withTitle: "Knip", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Plak", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Selecteer alles", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         let main = NSMenu()
         for submenu in [appMenu, editMenu] {
@@ -197,17 +199,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func openFromMenu() { open() }
 
-    @objc private func reloadLogins() { model.refresh(unlock: true) }
+    @objc private func synchronizeFromMenu() {
+        open(showFavorites: true)
+        synchronizeFromPanel()
+    }
 
-    /// Forgets fetched passwords and quits Passwords if it's only open for QuickPass, which locks
-    /// it, so the next visit needs Touch ID. Also runs when the screen locks or the Mac sleeps.
+    /// Discards unlocked state when explicitly locked, when the screen locks, or when the Mac sleeps.
     @objc private func lockNow() {
         if panel.isVisible { close(restoringFocus: false) }
         model.lock()
-        model.quitPasswordsIfIdle(onlyIfLocked: false)
     }
-
-    @objc private func checkForUpdates() { updater.checkForUpdates() }
 
     @objc private func showSettings() {
         close(restoringFocus: false)
@@ -216,40 +217,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func toggle() { panel.isVisible ? close(restoringFocus: true) : open() }
 
-    private func open() {
-        guard AXIsProcessTrusted() else { welcome.show(); return }
+    private func open(showFavorites: Bool = false) {
         // Activating QuickPass would bring Settings forward along with the panel.
         settings.close()
         if let front = NSWorkspace.shared.frontmostApplication,
            front.processIdentifier != getpid(), front.bundleIdentifier != PasswordsApp.bundleID {
             previousApp = front
         }
-        browserHost = preferences.suggestFromBrowser ? BrowserTab.host(in: previousApp) : nil
-        let site = browserHost.flatMap(BrowserTab.siteName(fromHost:))
-        present(suggesting: site)
-        // Touch ID up front, so copying, details and fill don't stop for it later. It has to come
-        // after the panel: macOS only lets the active app bring Passwords forward, and QuickPass
-        // becomes active by showing it.
-        if preferences.unlockOnOpen { unlock() }
+        present(showFavorites: showFavorites)
     }
 
-    private func unlock() {
+    private var hasPasswordsAccess: Bool {
+        #if DEBUG
+        if Demo.isOn { return true }
+        #endif
+        return AXIsProcessTrusted()
+    }
+
+    private func synchronizeFromPanel() {
+        guard hasPasswordsAccess else { welcome.show(); return }
         let started = Date()
-        model.unlockIfNeeded { [weak self] outcome in
-            guard let self, outcome != .notNeeded else { return }
-            // Touch ID stops when the user clicks elsewhere, and then they've moved on.
-            if outcome == .failed, clickedAway(since: started) { close(restoringFocus: false) } else { returnToPanel() }
+        model.synchronizeFavorites { [weak self] in
+            self?.returnToPanel(since: started)
         }
     }
 
-    private func present(suggesting site: String?) {
-        model.willOpen(suggesting: site)
+    private func present(showFavorites: Bool) {
+        model.willOpen(showFavorites: showFavorites)
         show()
         selectSearchText()
-        // Nothing to search yet: go straight to Touch ID and load the list.
-        if model.logins.isEmpty, !model.busy {
-            model.refresh(unlock: true) { [weak self] in self?.returnToPanel() }
-        }
     }
 
     /// The visible search card while the panel is open, in top-left-based screen coordinates,
@@ -265,7 +261,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// every keystroke lands here instead of in the app behind it.
     private func show() {
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
-        if let frame = screen?.visibleFrame {
+        if model.openedFromMenuBar, let button = statusItem.button, let window = button.window,
+           let frame = window.screen?.visibleFrame {
+            let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
+            let left = min(max(anchor.midX - panel.frame.width / 2, frame.minX), max(frame.minX, frame.maxX - panel.frame.width))
+            panel.setFrameTopLeftPoint(NSPoint(x: left, y: min(anchor.minY, frame.maxY) + SearchPanel.cardTop - 6))
+        } else if let frame = screen?.visibleFrame {
             panel.setFrameTopLeftPoint(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - frame.height * 0.16))
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -279,7 +280,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         DispatchQueue.main.async { [self] in
             panel.orderOut(nil)
             model.didClose()
-            quitPasswordsIfDone()
             if restoringFocus { restoreFocus(then: then) }
         }
     }
@@ -305,17 +305,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.restoreFocus(then: then, attempt: attempt + 1) }
             return
         }
-        previousApp?.activate()
+        guard let previousApp else { return }
+        previousApp.activate()
         guard let then else { return }
-        waitForPreviousApp(then: then)
+        waitForApplication(previousApp, then: then)
     }
 
-    private func waitForPreviousApp(then: @escaping () -> Void, attempt: Int = 0) {
-        if NSWorkspace.shared.frontmostApplication == previousApp || attempt >= 40 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: then)
+    private func waitForApplication(_ app: NSRunningApplication, then: @escaping () -> Void, attempt: Int = 0) {
+        if NSWorkspace.shared.frontmostApplication == app {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                if NSWorkspace.shared.frontmostApplication == app { then() }
+            }
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in self?.waitForPreviousApp(then: then, attempt: attempt + 1) }
+        guard attempt < 40 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
+            self?.waitForApplication(app, then: then, attempt: attempt + 1)
+        }
     }
 
     /// Moves the panel out of the way of Passwords' Touch ID prompt, but only once Passwords is in
@@ -387,8 +393,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return nil
         }
         switch (Int(event.keyCode), modifiers) {
-        case (kVK_Return, []) where model.waitingForUnlock:
-            unlock()
         case (kVK_Escape, []):
             if model.detail { model.detail = false } else { close(restoringFocus: true) }
         case (kVK_LeftArrow, []) where model.detail:
@@ -402,9 +406,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         case (kVK_UpArrow, []):
             model.detail ? model.moveInDetail(-1) : model.move(-1)
         case (kVK_Return, []) where !model.detail && model.isOnCreateRow, (kVK_ANSI_N, [.command]):
-            model.startNewLogin(browserHost: browserHost)
+            model.startNewLogin()
         case (kVK_Return, []) where model.detail:
             if let item = model.selectedItem { activate(item) }
+        case (kVK_Return, []) where model.showsFavorites && model.selectedLogin != nil:
+            copy(.password)
         case (kVK_Return, [.command]) where model.selectedLogin != nil:
             fill()
         case (kVK_Return, [.command, .option]) where model.selectedLogin?.hasCode == true:
@@ -437,8 +443,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func copy(_ field: Field) {
-        model.copy(field) { [weak self] copied in
+    private func copy(_ field: Field, favorite: Login? = nil) {
+        let login = favorite ?? (model.showsFavorites && !model.detail ? model.selectedLogin : nil)
+        model.copy(field, for: login) { [weak self] copied in
             if copied { self?.close(restoringFocus: true) } else { self?.returnToPanel() }
         }
     }

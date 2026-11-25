@@ -1,7 +1,7 @@
 import AppKit
 
 @main
-enum QuickPassApp {
+enum SnelWachtwoordApp {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()

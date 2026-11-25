@@ -5,7 +5,8 @@ struct SearchView: View {
     @ObservedObject var preferences: Preferences
     /// Runs a detail view row: Return or a double-click.
     let activate: (DetailItem) -> Void
-    let unlock: () -> Void
+    let synchronize: () -> Void
+    let copyFavorite: (Field, Login) -> Void
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -21,7 +22,7 @@ struct SearchView: View {
                 if model.detail, let login = model.selectedLogin {
                     DetailView(model: model, preferences: preferences, login: login, activate: activate)
                 } else {
-                    ResultsList(model: model, preferences: preferences, unlock: unlock)
+                    ResultsList(model: model, preferences: preferences, copyFavorite: copyFavorite)
                 }
             }
         }
@@ -41,10 +42,15 @@ struct SearchView: View {
             Image(systemName: "key.fill")
                 .font(.system(size: 19, weight: .medium))
                 .foregroundStyle(.secondary)
-            TextField("Search Passwords", text: $model.query)
+            TextField("Zoek in Wachtwoorden", text: $model.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 22))
                 .focused($focused)
+            if !model.detail, model.showsFavorites || model.logins.isEmpty {
+                Button("Synchroniseer favorieten", action: synchronize)
+                    .buttonStyle(.bordered)
+                    .disabled(model.busy)
+            }
         }
         .padding(.horizontal, 18)
         .frame(height: 58)
@@ -77,7 +83,7 @@ private struct CardBackground: ViewModifier {
 private struct ResultsList: View {
     @ObservedObject var model: SearchModel
     @ObservedObject var preferences: Preferences
-    let unlock: () -> Void
+    let copyFavorite: (Field, Login) -> Void
     private let rowHeight: CGFloat = 50
     private let maxVisibleRows = 7
 
@@ -85,25 +91,42 @@ private struct ResultsList: View {
 
     var body: some View {
         let results = model.results
+        let showOnlyFavorites = model.showsFavorites
+        let hasFooter = !showOnlyFavorites || results.isEmpty
         Divider().padding(.horizontal, 12)
+        if showOnlyFavorites {
+            HStack {
+                Text("Favorieten").fontWeight(.semibold)
+                Spacer()
+                if !results.isEmpty { Text("Klik voor wachtwoord · Rechtsklik voor gebruikersnaam") }
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 18)
+            .padding(.top, 10)
+        }
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(results.enumerated()), id: \.offset) { index, login in
-                        LoginRow(login: login, iconHost: model.iconHost(for: login), icons: model.icons,
-                                 selected: index == model.selection, copied: model.copied[login] ?? [], preferences: preferences)
+                        resultRow(login, at: index)
                             .frame(height: rowHeight)
                             .id(index)
-                            .onTapGesture { model.selection = index }
                     }
-                    if !results.isEmpty {
+                    if !results.isEmpty && hasFooter {
                         Divider().padding(.horizontal, 6).padding(.vertical, 4)
                     }
-                    if model.waitingForUnlock {
-                        UnlockRow()
-                            .frame(height: createRowHeight)
-                            .id(Self.createRowID)
-                            .onTapGesture(perform: unlock)
+                    if showOnlyFavorites {
+                        if results.isEmpty {
+                            Text(model.logins.isEmpty
+                                 ? "Synchroniseer om je inloggegevens te laden."
+                                 : "Zoek inloggegevens en klik op de ster om ze hier toe te voegen.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .frame(height: createRowHeight)
+                        }
                     } else {
                         CreateRow(query: model.query, selected: model.isOnCreateRow)
                             .frame(height: createRowHeight)
@@ -116,7 +139,8 @@ private struct ResultsList: View {
                 .padding(6)
             }
             .scrollIndicators(.never)
-            .frame(height: CGFloat(min(results.count, maxVisibleRows)) * rowHeight + createRowHeight + (results.isEmpty ? 12 : 21))
+            .frame(height: CGFloat(min(results.count, maxVisibleRows)) * rowHeight
+                + (hasFooter ? createRowHeight : 0) + (!results.isEmpty && hasFooter ? 21 : 12))
             .onAppear { proxy.scrollTo(scrollID(model.selection, of: results)) }
             .onChange(of: model.selection) { _, index in proxy.scrollTo(scrollID(index, of: results)) }
             // A shorter list keeps the old scroll position, which can leave the results above the
@@ -128,10 +152,83 @@ private struct ResultsList: View {
         }
     }
 
+    private func resultRow(_ login: Login, at index: Int) -> some View {
+        let row = LoginRow(login: login, selected: index == model.selection,
+                           copied: model.copied[login] ?? [], preferences: preferences)
+        let pinned = model.favorites.contains(login)
+        let pinLabel = pinned ? "Uit favorieten verwijderen" : "Aan favorieten toevoegen"
+        return HStack(spacing: 0) {
+            if model.showsFavorites {
+                FavoriteButton(login: login, index: index, copy: { copyFavorite($0, login) })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 10)
+                    .background(RoundedRectangle(cornerRadius: 10)
+                        .fill(index == model.selection ? Color.accentColor.opacity(0.22) : .clear))
+            } else {
+                row.onTapGesture { model.selection = index }
+            }
+            if pinned || model.canFavorite(login) {
+                Button { model.toggleFavorite(login) } label: {
+                    Image(systemName: pinned ? "star.fill" : "star")
+                        .foregroundStyle(pinned ? Color.accentColor : Color.secondary)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .disabled(model.busy)
+                .help(pinLabel)
+                .accessibilityLabel(pinLabel)
+                .accessibilityIdentifier("favorite-toggle-\(index)")
+            }
+        }
+    }
+
     private static let createRowID = "create"
 
     private func scrollID(_ index: Int, of results: [Login]) -> AnyHashable {
         index < results.count ? AnyHashable(index) : AnyHashable(Self.createRowID)
+    }
+}
+
+private struct FavoriteButton: NSViewRepresentable {
+    let login: Login
+    let index: Int
+    let copy: (Field) -> Void
+
+    func makeNSView(context: Context) -> CopyButton {
+        let button = CopyButton()
+        button.isBordered = false
+        button.alignment = .left
+        button.cell?.lineBreakMode = .byTruncatingTail
+        button.target = button
+        button.action = #selector(CopyButton.copyPassword)
+        button.setAccessibilityHelp("Klik om het wachtwoord te kopiëren. Klik met de rechtermuisknop voor de gebruikersnaam.")
+        button.setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: "Gebruikersnaam kopiëren") { [weak button] in
+                guard let button else { return false }
+                button.copy?(.username)
+                return true
+            },
+        ])
+        return button
+    }
+
+    func updateNSView(_ button: CopyButton, context: Context) {
+        button.title = login.username.isEmpty ? login.title : "\(login.title) · \(login.username)"
+        button.setAccessibilityIdentifier("favorite-copy-\(index)")
+        button.copy = copy
+    }
+
+    final class CopyButton: NSButton {
+        var copy: ((Field) -> Void)?
+
+        @objc func copyPassword() { copy?(.password) }
+
+        override func rightMouseDown(with event: NSEvent) {}
+
+        override func rightMouseUp(with event: NSEvent) {
+            if bounds.contains(convert(event.locationInWindow, from: nil)) { copy?(.username) }
+        }
     }
 }
 
@@ -147,7 +244,7 @@ private struct CreateRow: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 30)
-            Text(name.isEmpty ? "Create a new login" : "Create a login for \u{201C}\(name)\u{201D}")
+            Text(name.isEmpty ? "Nieuwe inloggegevens toevoegen" : "Inloggegevens toevoegen voor “\(name)”")
                 .font(.system(size: 14))
                 .lineLimit(1)
             Spacer(minLength: 8)
@@ -160,40 +257,18 @@ private struct CreateRow: View {
     }
 }
 
-/// Takes the Create row's place while Passwords is locked and the list is hidden.
-private struct UnlockRow: View {
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "lock.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 30)
-            Text("Unlock Passwords")
-                .font(.system(size: 14))
-            Spacer(minLength: 8)
-            Chip(icon: "touchid", label: "↩")
-        }
-        .padding(.horizontal, 10)
-        .frame(maxHeight: .infinity)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.22)))
-        .contentShape(Rectangle())
-    }
-}
-
 private struct LoginRow: View {
     let login: Login
-    let iconHost: String?
-    let icons: SiteIcons
     let selected: Bool
     let copied: Set<Field>
     @ObservedObject var preferences: Preferences
 
     var body: some View {
         HStack(spacing: 12) {
-            LoginIcon(login: login, host: iconHost, size: 30, icons: icons, preferences: preferences)
+            Monogram(title: login.title, size: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text(login.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Text(login.username.isEmpty ? "No username" : login.username)
+                Text(login.username.isEmpty ? "Geen gebruikersnaam" : login.username)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

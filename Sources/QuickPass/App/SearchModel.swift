@@ -1,5 +1,5 @@
 import AppKit
-import os
+import LocalAuthentication
 
 /// State behind the search panel: the login list, the search, the selection, and values fetched
 /// from Passwords. Lives on the main thread; Passwords work happens on a background queue.
@@ -18,6 +18,8 @@ final class SearchModel: ObservableObject {
     /// Holding ⌥ in the detail view shows a password that has already been fetched.
     @Published var reveal = false
     @Published private(set) var logins: [Login] = []
+    @Published private(set) var favorites: Set<Login> = []
+    @Published private(set) var openedFromMenuBar = false
     @Published private(set) var copied: [Login: Set<Field>] = [:]
     @Published var status: String?
     @Published private(set) var busy = false
@@ -38,21 +40,11 @@ final class SearchModel: ObservableObject {
     }
 
     @Published private var held: [Login: Held] = [:]
-    /// Each login's website by Login.key, for icons. Empty for a login without one.
-    @Published private(set) var websites: [String: String] = [:]
-    /// True while the website backfill runs.
-    @Published private(set) var backfillRunning = false
-    /// Why the last backfill stopped early.
-    @Published private(set) var backfillNote: String?
-    /// Read on the Passwords queue before each login, so Stop takes effect right away.
-    private let backfillStop = OSAllocatedUnfairLock(initialState: false)
     private var usage: [String: Int]
     private var pending = 0 { didSet { busy = pending > 0 } }
     /// Fields being fetched right now, by login. A repeat press during a fetch is dropped, since
     /// the first one finishes the job and every extra fetch goes back to Passwords.
     private var fetching: [Login: Set<Field>] = [:]
-    /// With Unlock on open, the list stays hidden until Passwords has unlocked.
-    @Published private(set) var waitingForUnlock = false
     private var lastUsed = Date.distantPast
     /// When the list was last read from Passwords. Touched only on the Passwords queue.
     private var lastLoaded = Date.distantPast
@@ -63,22 +55,24 @@ final class SearchModel: ObservableObject {
     private var reloadRun = 0
     private var reloadRead: [Login] = []
     private var reloadTotal = 0
-    /// A quit asked for while a reload runs, done when it ends. Touched only on the Passwords queue.
-    private var quitAfterReload: Bool?
     private var codeTimer: Timer?
     private var lastCodeAttempt = Date.distantPast
     private let passwords: PasswordsApp
+    private let favoriteStore: FavoritePasswordStore
+    private let pasteboard: NSPasteboard
+    private var favoriteAuthentication: LAContext?
+    private var favoritesUnlocked = false
+    private var lockGeneration = 0
     /// False in demo mode, which must never touch the real saved files.
     private let persists: Bool
-    let icons = SiteIcons()
-    private let queue = DispatchQueue(label: "QuickPass.Passwords")
+    private let queue = DispatchQueue(label: "SnelWachtwoord.Passwords")
     private let preferences: Preferences
 
     /// Titles and usernames only, so search works before Touch ID. Never passwords or codes.
     private static let cacheURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("QuickPass/logins.json")
-    private static let websitesURL = cacheURL.deletingLastPathComponent().appendingPathComponent("websites.json")
+        .appendingPathComponent("nl.webwerf.snelwachtwoord/logins.json")
     private static let usageKey = "usage"
+    private static let favoritesKey = "favorites"
 
     /// Where to tuck Passwords' window while QuickPass works in it. See PasswordsApp.hidingSpot.
     var passwordsHidingSpot: () -> CGRect? {
@@ -86,10 +80,13 @@ final class SearchModel: ObservableObject {
         set { passwords.hidingSpot = newValue }
     }
 
-    init(preferences: Preferences, passwords: PasswordsApp = PasswordsApp(), persists: Bool = true) {
+    init(preferences: Preferences, passwords: PasswordsApp = PasswordsApp(), persists: Bool = true,
+         pasteboard: NSPasteboard = .general) {
         self.preferences = preferences
         self.passwords = passwords
         self.persists = persists
+        favoriteStore = FavoritePasswordStore(inMemory: !persists)
+        self.pasteboard = pasteboard
         usage = persists ? UserDefaults.standard.dictionary(forKey: Self.usageKey) as? [String: Int] ?? [:] : [:]
         // Opening Passwords yourself is how logins get edited, so values read before can't be trusted.
         _ = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
@@ -98,22 +95,49 @@ final class SearchModel: ObservableObject {
             self.forget()
         }
         guard persists else { return }
+        if let data = UserDefaults.standard.data(forKey: Self.favoritesKey),
+           let saved = try? JSONDecoder().decode(Set<Login>.self, from: data) {
+            favorites = saved
+        }
         if let data = try? Data(contentsOf: Self.cacheURL), let saved = try? JSONDecoder().decode([Login].self, from: data) {
             logins = saved
         }
-        if let data = try? Data(contentsOf: Self.websitesURL), let saved = try? JSONDecoder().decode([String: String].self, from: data) {
-            websites = saved
-        }
-        // Websites read by an earlier scan may not have their icons yet.
-        DispatchQueue.main.async { self.logins.forEach(self.fetchIcon) }
     }
 
     // MARK: - What the panel shows
 
+    var showsFavorites: Bool { openedFromMenuBar && query.trimmingCharacters(in: .whitespaces).isEmpty }
+    var authenticatingFavorite: Bool { favoriteAuthentication != nil }
+
+    func canFavorite(_ login: Login) -> Bool { !login.title.isEmpty && login.copy == 0 && canDelete(login) }
+
+    func toggleFavorite(_ login: Login) {
+        guard !busy else { return }
+        if favorites.contains(login) {
+            changeFavoritePasswords({ store in
+                var passwords = try store.read()
+                passwords.removeValue(forKey: login)
+                try store.replace(with: passwords)
+            }) { succeeded in
+                guard succeeded else { return }
+                self.favorites.remove(login)
+                self.saveFavorites()
+            }
+        } else if canFavorite(login) {
+            favorites.insert(login)
+            saveFavorites()
+        }
+    }
+
+    private func saveFavorites() {
+        selection = min(selection, results.count)
+        if persists { UserDefaults.standard.set(try? JSONEncoder().encode(favorites), forKey: Self.favoritesKey) }
+    }
+
     /// Title prefix matches first, then title matches, then username matches. Within each group,
     /// the logins used most come first.
     var results: [Login] {
-        guard !waitingForUnlock else { return [] }
+        if showsFavorites { return Login.favorites(in: logins, pinned: favorites) }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         let ranked: [(login: Login, rank: Int)] = q.isEmpty ? logins.map { ($0, 0) } : logins.compactMap { login in
             let title = login.title.lowercased()
@@ -159,28 +183,22 @@ final class SearchModel: ObservableObject {
 
     // MARK: - Panel lifecycle
 
-    /// Starts fresh unless the panel was used recently. A fresh start searches for the browser
-    /// tab's site when there's a login for it.
-    func willOpen(suggesting site: String?) {
-        waitingForUnlock = false
-        if Date().timeIntervalSince(lastUsed) > TimeInterval(preferences.rememberSearchFor) {
-            forget()
+    /// Starts fresh unless the panel was used recently.
+    func willOpen(showFavorites: Bool) {
+        let changedEntryPoint = openedFromMenuBar != showFavorites
+        openedFromMenuBar = showFavorites
+        let expired = Date().timeIntervalSince(lastUsed) > TimeInterval(preferences.rememberSearchFor)
+        if expired { forget() }
+        if expired || changedEntryPoint || showFavorites {
             query = ""
             selection = 0
             detail = false
             newLogin = nil
             generatedPassword = nil
-            if let site, logins.contains(where: { $0.title.lowercased().replacingOccurrences(of: " ", with: "").contains(site) }) {
-                query = site
-            }
         }
         status = nil
         opens += 1
         if detail { startCodeTimer() }
-        // Passwords stays unlocked while the panel is in use. The next close asks again.
-        queue.async { self.quitAfterReload = nil }
-        // Later than the first copy, which would otherwise wait for the reload's first piece.
-        queue.asyncAfter(deadline: .now() + 2) { self.reloadIfStale(fillBlanks: false) }
     }
 
     func didClose() {
@@ -191,37 +209,48 @@ final class SearchModel: ObservableObject {
             guard let self, Date().timeIntervalSince(self.lastUsed) > rememberFor else { return }
             self.forget()
         }
-        queue.async { self.reloadIfStale(fillBlanks: false) }
     }
 
     /// Forgets fetched passwords and codes and the last search, so the next visit starts over.
     /// Stops a reload, so Passwords can quit and lock right away.
     func lock() {
+        lockGeneration += 1
+        favoriteAuthentication?.invalidate()
+        favoriteAuthentication = nil
+        favoritesUnlocked = false
         forget()
         lastUsed = .distantPast
-        queue.async { self.reloading = false; self.quitAfterReload = nil }
+        queue.async { self.reloading = false }
     }
 
     // MARK: - Navigation
 
     /// The list always ends with a "Create a new login" row, one past the last result.
     func move(_ delta: Int) {
-        selection = max(0, min(results.count, selection + delta))
+        let lastRow = results.count - (showsFavorites ? 1 : 0)
+        selection = max(0, min(lastRow, selection + delta))
     }
 
-    var isOnCreateRow: Bool { selection == results.count }
+    var isOnCreateRow: Bool { !showsFavorites && selection == results.count }
 
-    /// Opens the new-login form. A search that looks like an address becomes the website, and any
-    /// other search becomes the title. The browser tab QuickPass was opened over fills in whichever
-    /// is still missing.
-    func startNewLogin(browserHost: String?) {
+    /// Opens the new-login form using an address or title from the search.
+    func startNewLogin() {
         let typed = query.trimmingCharacters(in: .whitespaces)
         let isAddress = typed.contains(".") && !typed.contains(" ")
-        let website = isAddress ? typed.lowercased() : browserHost ?? ""
-        let siteName = BrowserTab.siteName(fromHost: website).map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? ""
+        let website = isAddress ? typed.lowercased() : ""
+        let siteName = Self.siteName(fromHost: website).map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? ""
         let title = isAddress || typed.isEmpty ? siteName : typed
         newLogin = NewLogin(title: title, website: website, password: preferences.generatePassword())
         status = nil
+    }
+
+    /// The label just left of the domain suffix, so subdomains and "co.uk" style suffixes drop off.
+    private static func siteName(fromHost host: String) -> String? {
+        let parts = host.lowercased().split(separator: ".").map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let secondLevel: Set = ["co", "com", "org", "net", "gov", "ac", "edu"]
+        let index = parts.count >= 3 && secondLevel.contains(parts[parts.count - 2]) ? parts.count - 3 : parts.count - 2
+        return parts[index]
     }
 
     func moveInDetail(_ delta: Int) {
@@ -246,8 +275,13 @@ final class SearchModel: ObservableObject {
     // MARK: - Actions
 
     /// Puts a field of the selected login on the clipboard. Calls done(true) once it's there.
-    func copy(_ field: Field, done: @escaping (Bool) -> Void) {
-        guard let login = selectedLogin else { return }
+    func copy(_ field: Field, for favorite: Login? = nil, done: @escaping (Bool) -> Void) {
+        guard let login = favorite ?? selectedLogin else { return }
+        guard favorite == nil || !busy else { return }
+        if favorite != nil, field == .password {
+            copyFavoritePassword(for: login, done: done)
+            return
+        }
         if field == .code, !login.hasCode { NSSound.beep(); return }
         if let value = freshValue(field, for: login) {
             finishCopy(value, field, login)
@@ -255,7 +289,7 @@ final class SearchModel: ObservableObject {
             return
         }
         if field == .username || (field != .code && held[login]?.fetched.contains(field) == true) {
-            fail("Nothing saved for that in this login.")
+            fail("Dit veld is leeg in Wachtwoorden.")
             done(false)
             return
         }
@@ -265,8 +299,74 @@ final class SearchModel: ObservableObject {
                 self.finishCopy(value, field, login)
                 done(true)
             } else {
-                self.fail(field == .code ? "Passwords didn't return a code. Try again." : "Nothing saved for that in this login.")
+                self.fail(field == .code ? "Er is geen verificatiecode opgehaald. Probeer het opnieuw." : "Dit veld is leeg in Wachtwoorden.")
                 done(false)
+            }
+        }
+    }
+
+    private func copyFavoritePassword(for login: Login, done: @escaping (Bool) -> Void) {
+        guard favorites.contains(login) else { done(false); return }
+        let generation = lockGeneration
+        pending += 1
+        let copy = {
+            self.queue.async {
+                let result = Result { try self.favoriteStore.read()[login] }
+                DispatchQueue.main.async {
+                    self.pending -= 1
+                    guard generation == self.lockGeneration else { return }
+                    switch result {
+                    case .success(let password?):
+                        self.finishCopy(password, .password, login)
+                        done(true)
+                    case .success(nil):
+                        self.fail("Synchroniseer je favorieten om dit wachtwoord lokaal op te slaan.")
+                        done(false)
+                    case .failure:
+                        self.fail("De lokale kopie kon niet uit de sleutelhanger worden gelezen.")
+                        done(false)
+                    }
+                }
+            }
+        }
+        if !persists || favoritesUnlocked { copy(); return }
+
+        let context = LAContext()
+        favoriteAuthentication = context
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Ontgrendel je lokale favoriete wachtwoorden.") { allowed, _ in
+            DispatchQueue.main.async {
+                guard generation == self.lockGeneration else { self.pending -= 1; return }
+                self.favoriteAuthentication = nil
+                guard allowed else {
+                    self.pending -= 1
+                    self.status = "De lokale favorieten zijn vergrendeld."
+                    done(false)
+                    return
+                }
+                self.favoritesUnlocked = true
+                copy()
+            }
+        }
+    }
+
+    func eraseFavoritePasswords(done: @escaping (Bool) -> Void) {
+        changeFavoritePasswords({ try $0.replace(with: [:]) }, done: done)
+    }
+
+    private func changeFavoritePasswords(_ change: @escaping (FavoritePasswordStore) throws -> Void,
+                                         done: @escaping (Bool) -> Void) {
+        guard !busy else { done(false); return }
+        pending += 1
+        queue.async {
+            let result = Result { try change(self.favoriteStore) }
+            DispatchQueue.main.async {
+                self.pending -= 1
+                switch result {
+                case .success: done(true)
+                case .failure:
+                    self.fail("De lokale kopieën konden niet worden bijgewerkt.")
+                    done(false)
+                }
             }
         }
     }
@@ -292,8 +392,9 @@ final class SearchModel: ObservableObject {
         guard let login = selectedLogin else { return }
         let deliver = {
             guard let site = self.held[login]?.values[.website],
-                  let url = URL(string: site.contains("://") ? site : "https://\(site)") else {
-                self.fail("No website saved for this login.")
+                  let url = URL(string: site.contains("://") ? site : "https://\(site)"),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
+                self.fail("Er is geen geldige website voor deze inloggegevens.")
                 completion(nil)
                 return
             }
@@ -307,8 +408,8 @@ final class SearchModel: ObservableObject {
     /// Saves the new-login form into Passwords, then copies the password for the sign-up form.
     func saveNewLogin(done: @escaping (Bool) -> Void) {
         guard let draft = newLogin else { return }
-        guard !draft.website.trimmingCharacters(in: .whitespaces).isEmpty else { fail("Add a website first."); return }
-        guard !draft.password.isEmpty else { fail("Add a password first."); return }
+        guard !draft.website.trimmingCharacters(in: .whitespaces).isEmpty else { fail("Vul eerst een website in."); return }
+        guard !draft.password.isEmpty else { fail("Vul eerst een wachtwoord in."); return }
         pending += 1
         usingPasswords = true
         status = nil
@@ -363,7 +464,7 @@ final class SearchModel: ObservableObject {
                     self.detail = false
                     self.held[login] = nil
                     self.update(self.logins.filter { $0 != login })
-                    self.status = "Deleted \(login.title). Passwords keeps it in Deleted for 30 days."
+                    self.status = "“\(login.title)” is verwijderd. Je kunt deze inloggegevens nog 30 dagen herstellen in Wachtwoorden."
                     done(true)
                 case .failure(let error):
                     self.fail(error.localizedDescription)
@@ -406,7 +507,7 @@ final class SearchModel: ObservableObject {
         guard let login = selectedLogin else { return }
         let deliver = {
             guard let password = self.held[login]?.values[.password] else {
-                self.fail("No password saved for this login.")
+                self.fail("Er is geen wachtwoord opgeslagen voor deze inloggegevens.")
                 completion(nil)
                 return
             }
@@ -422,7 +523,7 @@ final class SearchModel: ObservableObject {
         guard let login = selectedLogin, login.hasCode else { return }
         let deliver = {
             guard let code = self.freshValue(.code, for: login) else {
-                self.fail("Passwords didn't return a code. Try again.")
+                self.fail("Er is geen verificatiecode opgehaald. Probeer het opnieuw.")
                 completion(nil)
                 return
             }
@@ -433,57 +534,58 @@ final class SearchModel: ObservableObject {
         load([.code], for: login, allowUnlock: true) { ok in ok ? deliver() : completion(nil) }
     }
 
-    enum UnlockOutcome { case notNeeded, unlocked, failed }
-
-    /// Asks for Touch ID now if Passwords is locked, so nothing later in this visit has to.
-    /// Skipped while other work is reading Passwords: that work needs it unlocked anyway, and the
-    /// check would wait in line behind it.
-    func unlockIfNeeded(done: @escaping (UnlockOutcome) -> Void) {
-        guard !busy else { done(.notNeeded); return }
+    /// A complete read replaces the snapshot. Cancelled or failed reads leave it intact.
+    func synchronizeFavorites(done: @escaping () -> Void = {}) {
+        guard !busy else { return }
+        guard !persists || AXIsProcessTrusted() else {
+            fail("Geef SnelWachtwoord toegang via Toegankelijkheid in Systeeminstellingen.")
+            done()
+            return
+        }
+        let pinned = favorites
+        let generation = lockGeneration
         pending += 1
-        waitingForUnlock = true
+        usingPasswords = true
         status = nil
         queue.async {
-            var outcome = UnlockOutcome.notNeeded
-            if self.passwords.isLocked {
-                DispatchQueue.main.sync { self.usingPasswords = true; self.onUnlock?() }
-                outcome = self.passwords.unlock() ? .unlocked : .failed
-            }
-            DispatchQueue.main.async {
-                self.pending -= 1
-                self.usingPasswords = false
-                self.waitingForUnlock = outcome == .failed
-                done(outcome)
-            }
-        }
-    }
-
-    /// Queued behind any Passwords work still in progress, so a copy or fill always finishes first.
-    /// A reload that's partway through finishes first too.
-    func quitPasswordsIfIdle(onlyIfLocked: Bool) {
-        queue.async {
-            guard !self.reloading else {
-                self.quitAfterReload = (self.quitAfterReload ?? true) && onlyIfLocked
-                return
-            }
-            self.passwords.quitIfIdle(onlyIfLocked: onlyIfLocked)
-        }
-    }
-
-    func refresh(unlock: Bool, done: @escaping () -> Void = {}) {
-        pending += 1
-        queue.async {
+            let wasRunning = self.passwords.isRunning
             var list = self.passwords.loadLogins()
-            if list == nil, unlock {
-                DispatchQueue.main.sync { self.usingPasswords = true; self.onUnlock?() }
+            if list == nil {
+                DispatchQueue.main.sync { self.onUnlock?() }
                 if self.passwords.unlock() { list = self.passwords.loadLogins() }
             }
-            if list != nil { self.lastLoaded = Date() }
+            let result = Result<Int, Error> {
+                guard let list else { throw PasswordsError.unlockFailed }
+                self.lastLoaded = Date()
+                var passwords: [Login: String] = [:]
+                for login in Login.favorites(in: list, pinned: pinned) {
+                    if let password = try self.passwords.favoritePassword(for: login), !password.isEmpty {
+                        passwords[login] = password
+                    }
+                }
+                let stillUnlocked = DispatchQueue.main.sync { self.lockGeneration == generation }
+                guard stillUnlocked else { throw CancellationError() }
+                try self.favoriteStore.replace(with: passwords)
+                return passwords.count
+            }
+            // A copy uses only the keychain, so a Passwords instance opened for sync can go away now.
+            if !wasRunning { self.passwords.quitIfIdle() }
+            let loaded = list
             DispatchQueue.main.async {
                 self.pending -= 1
                 self.usingPasswords = false
-                self.waitingForUnlock = false
-                if let list { self.update(list) }
+                guard generation == self.lockGeneration else { return }
+                if let loaded { self.update(loaded) }
+                switch result {
+                case .success where pinned.isEmpty:
+                    self.status = "Kies met de ster je favorieten en synchroniseer opnieuw."
+                case .success(let count) where count == pinned.count:
+                    self.status = "Favorieten gesynchroniseerd."
+                case .success(let count):
+                    self.status = "\(count) van \(pinned.count) favorieten gesynchroniseerd. Controleer de overige in Wachtwoorden."
+                case .failure(let error as PasswordsError): self.fail(error.localizedDescription)
+                case .failure: self.fail("De lokale kopieën konden niet worden opgeslagen.")
+                }
                 done()
             }
         }
@@ -505,7 +607,8 @@ final class SearchModel: ObservableObject {
     /// stays hidden. Each visit to a login waits about half a second for the pane, so a visit
     /// also picks up whatever else is missing: the website, the code and, if Passwords reveals it,
     /// the password.
-    private func load(_ requested: [Field], for login: Login, allowUnlock: Bool, completion: @escaping (Bool) -> Void) {
+    private func load(_ requested: [Field], for login: Login, allowUnlock: Bool,
+                      completion: @escaping (Bool) -> Void) {
         var fields = Set(requested)
         if held[login]?.fetched.contains(.website) != true { fields.insert(.website) }
         if login.hasCode, !codeIsFresh(for: login) { fields.insert(.code) }
@@ -516,7 +619,10 @@ final class SearchModel: ObservableObject {
         if requested.contains(.password) { usingPasswords = true }
         if allowUnlock { status = nil }
         // The password fallback for a login Passwords won't reveal takes seconds, so it's only for a copy.
-        let work = { try self.passwords.details(for: login, copyPassword: requested.contains(.password)) }
+        let work = {
+            if !allowUnlock, !self.passwords.isRunning { throw PasswordsError.locked }
+            return try self.passwords.details(for: login, copyPassword: requested.contains(.password))
+        }
         queue.async {
             var result = Result { try work() }
             var unlocked = false
@@ -539,7 +645,6 @@ final class SearchModel: ObservableObject {
                     }
                     if fields.contains(.code) { h.codeAt = Date() }
                     self.held[login] = h
-                    if fields.contains(.website) { self.remember(website: values[.website] ?? "", for: login) }
                     completion(true)
                 case .failure(let error):
                     if allowUnlock { self.fail(error.localizedDescription) }
@@ -589,10 +694,6 @@ final class SearchModel: ObservableObject {
 
     private func endReload() {
         reloading = false
-        if let onlyIfLocked = quitAfterReload {
-            quitAfterReload = nil
-            passwords.quitIfIdle(onlyIfLocked: onlyIfLocked)
-        }
     }
 
     /// Keeps the code in the detail view current. Never asks for Touch ID on its own.
@@ -634,9 +735,9 @@ final class SearchModel: ObservableObject {
     }
 
     private func putOnClipboard(_ value: String, secret: Bool) {
-        let pasteboard = NSPasteboard.general
-        // Secrets stay on this Mac instead of reaching nearby devices through Universal Clipboard.
-        if secret { _ = pasteboard.prepareForNewContents(with: .currentHostOnly) } else { pasteboard.clearContents() }
+        let pasteboard = self.pasteboard
+        // Copied login fields stay on this Mac instead of reaching nearby devices through Universal Clipboard.
+        _ = pasteboard.prepareForNewContents(with: .currentHostOnly)
         pasteboard.setString(value, forType: .string)
         guard secret else { return }
         // Asks clipboard managers not to record it.
@@ -659,102 +760,6 @@ final class SearchModel: ObservableObject {
         copied = [:]
     }
 
-    // MARK: - Website icons
-
-    func iconHost(for login: Login) -> String? {
-        SiteIcons.host(website: websites[login.key], title: login.title)
-    }
-
-    /// Downloads a login's icon now rather than when its row first scrolls into view. Saved
-    /// icons are skipped, so this costs nothing for logins that already have one.
-    private func fetchIcon(for login: Login) {
-        guard preferences.showSiteIcons, let host = iconHost(for: login) else { return }
-        icons.request(host)
-    }
-
-    /// How many of the current logins have had their website read.
-    var websitesKnown: Int { logins.filter { websites[$0.key] != nil }.count }
-
-    /// Reads every login's website from Passwords so each can show its icon. Runs in small
-    /// batches on the Passwords queue, so a copy or fill never waits for the whole list, and
-    /// skips logins already read, so starting again continues where it stopped.
-    func startBackfill() {
-        guard !backfillRunning else { return }
-        backfillRunning = true
-        backfillStop.withLock { $0 = false }
-        backfillNote = nil
-        backfillBatch(first: true)
-    }
-
-    func stopBackfill() {
-        backfillStop.withLock { $0 = true }
-    }
-
-    /// Batches let a copy or fill run between them instead of waiting for the whole scan.
-    private func backfillBatch(first: Bool) {
-        // A row Passwords never drew has no title to match, so it can't be read.
-        let batch = Array(logins.filter { websites[$0.key] == nil && !$0.title.isEmpty }.prefix(20))
-        guard !batch.isEmpty else { backfillRunning = false; return }
-        queue.async {
-            let read = {
-                try self.passwords.websites(of: batch, fillBlanks: first,
-                                            stop: { self.backfillStop.withLock { $0 } },
-                                            found: { login, site in
-                                                DispatchQueue.main.async {
-                                                    self.websites[login.key] = site
-                                                    self.fetchIcon(for: login)
-                                                }
-                                            })
-            }
-            var result = Result(catching: read)
-            // Passwords locks itself after a few minutes in the background, which a full scan can
-            // outlast. Ask for Touch ID and keep going rather than stopping.
-            if case .failure(let error) = result, error as? PasswordsError == .locked {
-                DispatchQueue.main.sync { self.usingPasswords = true; self.onUnlock?() }
-                let unlocked = self.passwords.unlock()
-                DispatchQueue.main.sync { self.usingPasswords = false }
-                // Right after an unlock Passwords can take a moment to show its list again.
-                for _ in 0..<4 where unlocked {
-                    result = Result(catching: read)
-                    guard case .failure(let error) = result, error as? PasswordsError == .locked else { break }
-                    usleep(500_000)
-                }
-            }
-            DispatchQueue.main.async {
-                self.saveWebsites()
-                switch result {
-                case .success:
-                    if self.backfillStop.withLock({ $0 }) {
-                        self.backfillRunning = false
-                    } else {
-                        // A login Passwords couldn't show is marked done, so the scan can't loop on it.
-                        for login in batch where self.websites[login.key] == nil { self.websites[login.key] = "" }
-                        self.backfillBatch(first: false)
-                    }
-                case .failure(let error):
-                    self.backfillRunning = false
-                    self.backfillNote = error as? PasswordsError == .locked
-                        ? "Stopped because Passwords locked. Press Continue to unlock it and pick up where it stopped."
-                        : error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private func remember(website: String, for login: Login) {
-        guard websites[login.key] != website else { return }
-        websites[login.key] = website
-        saveWebsites()
-    }
-
-    private func saveWebsites() {
-        guard persists else { return }
-        let fileManager = FileManager.default
-        try? fileManager.createDirectory(at: Self.websitesURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(websites).write(to: Self.websitesURL, options: .atomic)
-        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.websitesURL.path)
-    }
-
     private func fail(_ message: String) {
         status = message
         NSSound.beep()
@@ -767,7 +772,8 @@ final class SearchModel: ObservableObject {
         if let current, let index = results.firstIndex(of: current), index != selection { selection = index }
         guard persists else { return }
         let fileManager = FileManager.default
-        try? fileManager.createDirectory(at: Self.cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: Self.cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                         attributes: [.posixPermissions: 0o700])
         try? JSONEncoder().encode(list).write(to: Self.cacheURL, options: .atomic)
         try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.cacheURL.path)
     }

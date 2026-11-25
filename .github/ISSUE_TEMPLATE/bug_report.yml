@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in QuickPass isn't working
+description: Something in SnelWachtwoord isn't working
 labels: [bug]
 body:
   - type: input
@@ -13,8 +13,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: QuickPass version
-      description: Shown in QuickPass Settings, under Updates
+      label: SnelWachtwoord version
+      description: Shown in Finder under Get Info for the app
       placeholder: "0.1.0"
     validations:
       required: true
