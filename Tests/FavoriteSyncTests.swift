@@ -8,17 +8,32 @@ private final class TestPasswords: PasswordsApp {
     private var readCount = 0
     private var requested: [Login] = []
     private var secret: String? = "fictional-password-one"
+    private var listed = [TestPasswords.other, TestPasswords.favorite]
+    private var accessAllowed = true
+    private var quitCount = 0
 
     var reads: Int { lock.withLock { readCount } }
     var requests: [Login] { lock.withLock { requested } }
 
     override var isRunning: Bool { true }
+    override var hasAccess: Bool { lock.withLock { accessAllowed } }
+    var quits: Int { lock.withLock { quitCount } }
+    func setAccess(_ allowed: Bool) { lock.withLock { accessAllowed = allowed } }
+    func clearLogins() { lock.withLock { listed = [] } }
+    override func quitIfIdle() { lock.withLock { quitCount += 1 } }
+    override func details(for login: Login, copyPassword: Bool) throws -> [Field: String] {
+        lock.withLock { readCount += 1 }
+        throw PasswordsError.locked
+    }
+    override func unlock() -> Bool { false }
 
     func changePassword(to secret: String?) { lock.withLock { self.secret = secret } }
 
     override func loadLogins(fillBlanks: Bool) -> [Login]? {
-        lock.withLock { readCount += 1 }
-        return [Self.other, Self.favorite]
+        lock.withLock {
+            readCount += 1
+            return listed
+        }
     }
 
     override func logins(from start: Int, max: Int, fillBlanks: Bool) -> (logins: [Login], total: Int)? {
@@ -100,6 +115,30 @@ struct FavoriteSyncTests {
             model.copy(.password, for: favorite) { continuation.resume(returning: $0) }
         }
         try require(erased && !copiedAfterErasing && model.favorites == [favorite], "Erasing local copies changed favorites or kept a password")
+        model.lock()
+        await withCheckedContinuation { continuation in model.synchronizeFavorites { continuation.resume() } }
+        try require(passwords.quits == 0, "Passive locking contacted Apple Passwords")
+        model.lock(includingApplePasswords: true)
+        await withCheckedContinuation { continuation in model.synchronizeFavorites { continuation.resume() } }
+        try require(passwords.quits == 1, "Explicit locking did not close idle Apple Passwords")
+
+        let readsBeforeRevocation = passwords.reads
+        passwords.setAccess(false)
+        model.willOpen(showFavorites: false)
+        model.query = "Fictional example"
+        let copiedWithoutAccess = await withCheckedContinuation { continuation in
+            model.copy(.password) { continuation.resume(returning: $0) }
+        }
+        try require(!copiedWithoutAccess && passwords.reads == readsBeforeRevocation,
+                    "Live copy contacted Apple Passwords after Accessibility access was revoked")
+
+        passwords.setAccess(true)
+        passwords.clearLogins()
+        await withCheckedContinuation { continuation in model.synchronizeFavorites { continuation.resume() } }
+        let copiedAfterEmptySync = await withCheckedContinuation { continuation in
+            model.copy(.password, for: favorite) { continuation.resume(returning: $0) }
+        }
+        try require(!copiedAfterEmptySync && model.logins.isEmpty, "An empty source kept the previous snapshot")
         print("Favorite sync, clipboard and erasure checks passed.")
     }
 

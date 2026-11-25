@@ -108,6 +108,7 @@ final class SearchModel: ObservableObject {
 
     var showsFavorites: Bool { openedFromMenuBar && query.trimmingCharacters(in: .whitespaces).isEmpty }
     var authenticatingFavorite: Bool { favoriteAuthentication != nil }
+    var hasPasswordsAccess: Bool { passwords.hasAccess }
 
     func canFavorite(_ login: Login) -> Bool { !login.title.isEmpty && login.copy == 0 && canDelete(login) }
 
@@ -213,14 +214,17 @@ final class SearchModel: ObservableObject {
 
     /// Forgets fetched passwords and codes and the last search, so the next visit starts over.
     /// Stops a reload, so Passwords can quit and lock right away.
-    func lock() {
+    func lock(includingApplePasswords: Bool = false) {
         lockGeneration += 1
         favoriteAuthentication?.invalidate()
         favoriteAuthentication = nil
         favoritesUnlocked = false
         forget()
         lastUsed = .distantPast
-        queue.async { self.reloading = false }
+        queue.async {
+            self.reloading = false
+            if includingApplePasswords { self.passwords.quitIfIdle() }
+        }
     }
 
     // MARK: - Navigation
@@ -410,6 +414,7 @@ final class SearchModel: ObservableObject {
         guard let draft = newLogin else { return }
         guard !draft.website.trimmingCharacters(in: .whitespaces).isEmpty else { fail("Vul eerst een website in."); return }
         guard !draft.password.isEmpty else { fail("Vul eerst een wachtwoord in."); return }
+        guard requirePasswordsAccess() else { done(false); return }
         pending += 1
         usingPasswords = true
         status = nil
@@ -447,6 +452,7 @@ final class SearchModel: ObservableObject {
     func delete(done: @escaping (Bool) -> Void) {
         guard let login = selectedLogin else { return }
         confirmingDelete = false
+        guard requirePasswordsAccess() else { done(false); return }
         pending += 1
         usingPasswords = true
         status = nil
@@ -477,6 +483,7 @@ final class SearchModel: ObservableObject {
     /// Shows the selected login in the Passwords app. Calls done(true) once Passwords is in front.
     func openInPasswords(done: @escaping (Bool) -> Void) {
         guard let login = selectedLogin else { return }
+        guard requirePasswordsAccess() else { done(false); return }
         pending += 1
         usingPasswords = true
         status = nil
@@ -537,11 +544,7 @@ final class SearchModel: ObservableObject {
     /// A complete read replaces the snapshot. Cancelled or failed reads leave it intact.
     func synchronizeFavorites(done: @escaping () -> Void = {}) {
         guard !busy else { return }
-        guard !persists || AXIsProcessTrusted() else {
-            fail("Geef SnelWachtwoord toegang via Toegankelijkheid in Systeeminstellingen.")
-            done()
-            return
-        }
+        guard requirePasswordsAccess() else { done(); return }
         let pinned = favorites
         let generation = lockGeneration
         pending += 1
@@ -609,6 +612,7 @@ final class SearchModel: ObservableObject {
     /// the password.
     private func load(_ requested: [Field], for login: Login, allowUnlock: Bool,
                       completion: @escaping (Bool) -> Void) {
+        guard allowUnlock ? requirePasswordsAccess() : hasPasswordsAccess else { completion(false); return }
         var fields = Set(requested)
         if held[login]?.fetched.contains(.website) != true { fields.insert(.website) }
         if login.hasCode, !codeIsFresh(for: login) { fields.insert(.code) }
@@ -758,6 +762,14 @@ final class SearchModel: ObservableObject {
     private func forget() {
         held = [:]
         copied = [:]
+    }
+
+    private func requirePasswordsAccess() -> Bool {
+        guard hasPasswordsAccess else {
+            fail("Geef SnelWachtwoord toegang via Toegankelijkheid in Systeeminstellingen.")
+            return false
+        }
+        return true
     }
 
     private func fail(_ message: String) {

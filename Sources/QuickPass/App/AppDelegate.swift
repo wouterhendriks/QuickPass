@@ -142,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         button.action = #selector(statusItemClicked(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusMenu.addItem(withTitle: "Zoeken in Wachtwoorden", action: #selector(openFromMenu), keyEquivalent: "").target = self
-        statusMenu.addItem(withTitle: "Nu vergrendelen", action: #selector(lockNow), keyEquivalent: "").target = self
+        statusMenu.addItem(withTitle: "Nu vergrendelen", action: #selector(lockFromMenu), keyEquivalent: "").target = self
         statusMenu.addItem(withTitle: "Synchroniseer favorieten", action: #selector(synchronizeFromMenu), keyEquivalent: "").target = self
         statusMenu.addItem(withTitle: "Instellingen…", action: #selector(showSettings), keyEquivalent: ",").target = self
         statusMenu.addItem(.separator())
@@ -205,10 +205,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Discards unlocked state when explicitly locked, when the screen locks, or when the Mac sleeps.
-    @objc private func lockNow() {
+    private func lockNow(includingApplePasswords: Bool = false) {
         if panel.isVisible { close(restoringFocus: false) }
-        model.lock()
+        model.lock(includingApplePasswords: includingApplePasswords)
     }
+
+    @objc private func lockFromMenu() { lockNow(includingApplePasswords: true) }
 
     @objc private func showSettings() {
         close(restoringFocus: false)
@@ -227,15 +229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         present(showFavorites: showFavorites)
     }
 
-    private var hasPasswordsAccess: Bool {
-        #if DEBUG
-        if Demo.isOn { return true }
-        #endif
-        return AXIsProcessTrusted()
-    }
-
     private func synchronizeFromPanel() {
-        guard hasPasswordsAccess else { welcome.show(); return }
+        guard model.hasPasswordsAccess else { welcome.show(); return }
         let started = Date()
         model.synchronizeFavorites { [weak self] in
             self?.returnToPanel(since: started)

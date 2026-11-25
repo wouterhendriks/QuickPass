@@ -73,9 +73,20 @@ class PasswordsApp {
         clearSearch()
         shownTile = nil
         show("AllTile")
-        var logins = rows().enumerated().map { login(of: $1, at: $0) }
-        // An empty read means the list hadn't drawn yet. Saving it would wipe the cache.
-        guard !logins.isEmpty else { return nil }
+        guard let initial = list().flatMap({ value($0, kAXRowsAttribute) as? [AXUIElement] }) else { return nil }
+        var visibleRows = initial
+        // A zero-row result can be real, but the list also passes through zero while drawing.
+        for _ in 0..<20 where visibleRows.isEmpty {
+            usleep(50_000)
+            guard let current = list().flatMap({ value($0, kAXRowsAttribute) as? [AXUIElement] }) else { return nil }
+            visibleRows = current
+        }
+        if visibleRows.isEmpty {
+            guard let sidebar = outlines().first, let all = element(in: sidebar, identifier: "AllTile"),
+                  value(all, kAXSelectedAttribute) as? Bool == true else { return nil }
+            return []
+        }
+        var logins = visibleRows.enumerated().map { login(of: $1, at: $0) }
         if logins.contains(where: { $0.title.isEmpty }) {
             guard fillBlanks else { return nil }
             fillBlankRows()
@@ -377,6 +388,7 @@ class PasswordsApp {
     }
 
     var isRunning: Bool { app != nil }
+    var hasAccess: Bool { AXIsProcessTrusted() }
 
     /// Passwords shows its Touch ID prompt by itself when its locked window comes forward.
     /// Moving the window or pressing its unlock button while the prompt is up cancels Touch ID,

@@ -48,6 +48,7 @@ final class DemoPasswords: PasswordsApp {
 
     override func loginsWithCodes() -> Set<Login>? { Set((loadLogins() ?? []).filter(\.hasCode)) }
     override var isRunning: Bool { true }
+    override var hasAccess: Bool { true }
 
     override func details(for login: Login, copyPassword: Bool) throws -> [Field: String] {
         guard let entry = entry(login) else { throw PasswordsError.notFound }
